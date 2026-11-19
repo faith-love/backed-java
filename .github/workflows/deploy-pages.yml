@@ -1,0 +1,86 @@
+name: Deploy VitePress to GitHub Pages
+
+on:
+  # 所有分支推送都执行构建；只有仓库默认分支会发布到 Pages。
+  push:
+    branches:
+      - '**'
+  # 允许在 GitHub Actions 页面手动触发部署默认分支。
+  workflow_dispatch:
+
+# 构建阶段仅读取源码和 Pages 元信息；部署权限在单独的 job 授予。
+permissions:
+  contents: read
+
+# 新提交替代尚未完成的旧部署，避免旧版本在后续才覆盖新版本。
+concurrency:
+  # 不同分支分别排队，避免非默认分支的构建取消默认分支部署。
+  group: github-pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build VitePress site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      # 检出触发本次工作流的 commit。
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      # 使用固定 Node 主版本，并根据锁文件缓存 npm 依赖。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # 从 lockfile 安装确定版本的依赖。
+      - name: Install dependencies
+        run: npm ci
+
+      # 读取 GitHub Pages 的站点路径，兼容根站和 /repository/ 项目站。
+      - name: Configure GitHub Pages
+        id: pages
+        uses: actions/configure-pages@v5
+
+      # VitePress 需要在构建时获得 Pages 子路径，生成正确的静态资源 URL。
+      - name: Set VitePress base path
+        shell: bash
+        run: |
+          base_path='${{ steps.pages.outputs.base_path }}'
+          if [[ -z "$base_path" ]]; then
+            echo 'VITEPRESS_BASE=/' >> "$GITHUB_ENV"
+          else
+            echo "VITEPRESS_BASE=${base_path%/}/" >> "$GITHUB_ENV"
+          fi
+
+      # 构建失败时工作流停止，不会发布不完整站点。
+      - name: Build site
+        run: npm run docs:build
+
+      # 上传 VitePress 的静态构建目录，供部署 job 使用。
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    # 工作流手动运行或普通推送时，只部署默认分支上的构建结果。
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      # 将当前工作流构建的 artifact 发布到 GitHub Pages。
+      - name: Deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
